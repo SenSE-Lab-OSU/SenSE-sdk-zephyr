@@ -58,6 +58,7 @@ ZTEST(util, test_u8_to_dec) {
 	len = u8_to_dec(text, 0, 123);
 	zassert_equal(len, 0,
 		      "Length of converted value using 0 byte buffer isn't 0");
+
 }
 
 ZTEST(util, test_sign_extend) {
