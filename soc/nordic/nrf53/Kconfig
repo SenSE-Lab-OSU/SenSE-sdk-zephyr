@@ -229,6 +229,15 @@ config SOC_ENABLE_LFXO
 	  to use the LFXO. Otherwise, XL1 and XL2 pins will behave as regular
 	  GPIOs.
 
+config SOC_LFXO_BYPASS
+	bool "LFXO bypass mode"
+	depends on SOC_ENABLE_LFXO
+	default n
+	help
+	  Use the LFXO in bypass mode with a rail-to-rail external clock
+	  source. XL1 remains controlled by the LFXO peripheral and XL2 is
+	  assigned to the application core.
+
 choice SOC_LFXO_LOAD_CAPACITANCE
 	prompt "LFXO load capacitance"
 	depends on SOC_ENABLE_LFXO

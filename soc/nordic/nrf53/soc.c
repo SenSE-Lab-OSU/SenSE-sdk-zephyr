@@ -473,6 +473,11 @@ static int nordicsemi_nrf53_init(void)
 #endif
 
 #if defined(CONFIG_SOC_ENABLE_LFXO)
+#if defined(CONFIG_SOC_LFXO_BYPASS)
+	nrf_oscillators_lfxo_cap_set(NRF_OSCILLATORS,
+		NRF_OSCILLATORS_LFXO_CAP_EXTERNAL);
+	nrf_oscillators_lfxo_bypass_set(NRF_OSCILLATORS, true);
+#else
 	nrf_oscillators_lfxo_cap_set(NRF_OSCILLATORS,
 		IS_ENABLED(CONFIG_SOC_LFXO_CAP_INT_6PF) ?
 			NRF_OSCILLATORS_LFXO_CAP_6PF :
@@ -481,13 +486,18 @@ static int nordicsemi_nrf53_init(void)
 		IS_ENABLED(CONFIG_SOC_LFXO_CAP_INT_9PF) ?
 			NRF_OSCILLATORS_LFXO_CAP_9PF :
 			NRF_OSCILLATORS_LFXO_CAP_EXTERNAL);
+#endif
 #if !defined(CONFIG_BUILD_WITH_TFM)
 	/* This can only be done from secure code.
 	 * This is handled by the TF-M platform so we skip it when TF-M is
 	 * enabled.
 	 */
 	nrf_gpio_pin_control_select(PIN_XL1, NRF_GPIO_PIN_SEL_PERIPHERAL);
+#if defined(CONFIG_SOC_LFXO_BYPASS)
+	nrf_gpio_pin_control_select(PIN_XL2, NRF_GPIO_PIN_SEL_APP);
+#else
 	nrf_gpio_pin_control_select(PIN_XL2, NRF_GPIO_PIN_SEL_PERIPHERAL);
+#endif
 #endif /* !defined(CONFIG_BUILD_WITH_TFM) */
 #endif /* defined(CONFIG_SOC_ENABLE_LFXO) */
 #if defined(CONFIG_SOC_HFXO_CAP_INTERNAL)
