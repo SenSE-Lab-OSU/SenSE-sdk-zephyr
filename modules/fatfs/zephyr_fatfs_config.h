@@ -89,7 +89,11 @@
 #define FF_FS_TINY 1
 
 #undef FF_FS_NORTC
-#define FF_FS_NORTC 1
+#define FF_FS_NORTC 0
+
+#undef FF_USE_EXPAND
+#define FF_USE_EXPAND 1
+
 
 /* Zephyr uses FF_VOLUME_STRS */
 #undef FF_STR_VOLUME_ID
