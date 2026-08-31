@@ -1,0 +1,7 @@
+tests:
+  usb.msc_media_policy:
+    platform_allow:
+      - native_sim/native/64
+    tags:
+      - usb
+      - msc

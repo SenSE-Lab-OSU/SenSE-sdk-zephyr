@@ -364,6 +364,9 @@ systems identifies the disc. Therefore, if the application also accesses the
 file system on the exposed disc, default names should be used, see
 :zephyr:code-sample:`usb-mass` sample for reference.
 
+For host-facing legacy MSC read-only and media-presence controls, see
+:ref:`legacy_usb_msc_api`.
+
 Networking
 ==========
 

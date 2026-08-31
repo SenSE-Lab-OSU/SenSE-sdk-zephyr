@@ -39,8 +39,11 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/__assert.h>
 #include <zephyr/storage/disk_access.h>
+#include <zephyr/usb/class/usb_msc.h>
 #include <zephyr/usb/usb_device.h>
 #include <usb_descriptor.h>
+
+#include "msc_media_policy.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(usb_msc, CONFIG_USB_MASS_STORAGE_LOG_LEVEL);
@@ -105,6 +108,14 @@ struct CSW {
 #define MODE_SELECT10			0x55
 #define MODE_SENSE10			0x5A
 
+#define MSC_SENSE_RESPONSE_CURRENT		0x70
+#define MSC_SENSE_KEY_NO_SENSE			0x00
+#define MSC_SENSE_KEY_NOT_READY		0x02
+#define MSC_SENSE_KEY_DATA_PROTECT		0x07
+#define MSC_SENSE_ASC_MEDIUM_NOT_PRESENT	0x3A
+#define MSC_SENSE_ASC_WRITE_PROTECTED		0x27
+#define MSC_MODE_SENSE6_WP			0x80
+
 /* max USB packet size */
 #define MAX_PACKET	CONFIG_MASS_STORAGE_BULK_EP_MPS
 
@@ -166,6 +177,7 @@ static K_KERNEL_STACK_DEFINE(mass_thread_stack, CONFIG_MASS_STORAGE_STACK_SIZE);
 static struct k_thread mass_thread_data;
 static struct k_sem disk_wait_sem;
 static volatile uint32_t defered_wr_sz;
+static struct msc_media_policy media_policy;
 
 /*
  * Keep block buffer larger than BLOCK_SIZE for the case
@@ -240,6 +252,14 @@ static uint8_t max_lun_count;
 /*memory OK (after a memoryVerify)*/
 static bool memOK;
 
+struct msc_pending_sense {
+	uint8_t key;
+	uint8_t asc;
+	uint8_t ascq;
+};
+
+static struct msc_pending_sense pending_sense;
+
 #define INQ_VENDOR_ID_LEN 8
 #define INQ_PRODUCT_ID_LEN 16
 #define INQ_REVISION_LEN 4
@@ -267,6 +287,74 @@ BUILD_ASSERT(sizeof(CONFIG_MASS_STORAGE_INQ_PRODUCT_ID) == (INQ_PRODUCT_ID_LEN +
 BUILD_ASSERT(sizeof(CONFIG_MASS_STORAGE_INQ_REVISION) == (INQ_REVISION_LEN + 1),
 	"CONFIG_MASS_STORAGE_INQ_REVISION must be 4 characters (pad with spaces)");
 
+static void clear_pending_sense(void)
+{
+	pending_sense.key = MSC_SENSE_KEY_NO_SENSE;
+	pending_sense.asc = 0U;
+	pending_sense.ascq = 0U;
+}
+
+static void record_policy_sense(enum msc_media_access access)
+{
+	switch (access) {
+	case MSC_MEDIA_ACCESS_NO_MEDIUM:
+		pending_sense.key = MSC_SENSE_KEY_NOT_READY;
+		pending_sense.asc = MSC_SENSE_ASC_MEDIUM_NOT_PRESENT;
+		pending_sense.ascq = 0U;
+		break;
+	case MSC_MEDIA_ACCESS_WRITE_PROTECTED:
+		pending_sense.key = MSC_SENSE_KEY_DATA_PROTECT;
+		pending_sense.asc = MSC_SENSE_ASC_WRITE_PROTECTED;
+		pending_sense.ascq = 0U;
+		break;
+	case MSC_MEDIA_ACCESS_ALLOWED:
+	default:
+		__ASSERT_NO_MSG(false);
+		break;
+	}
+}
+
+static int msc_disk_status(void *context)
+{
+	ARG_UNUSED(context);
+
+	return disk_access_status(disk_pdrv);
+}
+
+static enum msc_media_access check_media_access(bool write)
+{
+	return msc_media_policy_check(&media_policy, write, msc_disk_status, NULL);
+}
+
+static enum msc_media_access begin_media_operation(bool write)
+{
+	return msc_media_policy_begin_operation(&media_policy, write, msc_disk_status,
+						NULL);
+}
+
+static bool command_requires_media(uint8_t opcode, uint8_t command_byte_1)
+{
+	switch (opcode) {
+	case TEST_UNIT_READY:
+	case READ_FORMAT_CAPACITIES:
+	case READ_CAPACITY:
+	case READ10:
+	case READ12:
+	case WRITE10:
+	case WRITE12:
+		return true;
+	case VERIFY10:
+		return (command_byte_1 & 0x02U) != 0U;
+	default:
+		return false;
+	}
+}
+
+static bool command_is_write(uint8_t opcode)
+{
+	return opcode == WRITE10 || opcode == WRITE12;
+}
+
 static void msd_state_machine_reset(void)
 {
 	stage = MSC_READ_CBW;
@@ -280,6 +368,7 @@ static void msd_init(void)
 	curr_lba = 0U;
 	length = 0U;
 	curr_offset = 0U;
+	clear_pending_sense();
 }
 
 static void sendCSW(void)
@@ -305,6 +394,34 @@ static void fail(void)
 
 	csw.Status = CSW_FAILED;
 	sendCSW();
+}
+
+static void fail_for_media_access(enum msc_media_access access)
+{
+	record_policy_sense(access);
+	fail();
+}
+
+static bool admit_media_command(bool write)
+{
+	enum msc_media_access access = check_media_access(write);
+
+	if (access == MSC_MEDIA_ACCESS_ALLOWED) {
+		return true;
+	}
+
+	fail_for_media_access(access);
+	return false;
+}
+
+int usb_mass_storage_set_read_only(bool read_only)
+{
+	return msc_media_policy_set_read_only(&media_policy, read_only);
+}
+
+int usb_mass_storage_set_medium_present(bool present)
+{
+	return msc_media_policy_set_medium_present(&media_policy, present);
 }
 
 static bool write(uint8_t *buf, uint16_t size)
@@ -388,9 +505,9 @@ static void testUnitReady(void)
 static bool requestSense(void)
 {
 	uint8_t request_sense[] = {
-		0x70,
+		MSC_SENSE_RESPONSE_CURRENT,
 		0x00,
-		0x05,   /* Sense Key: illegal request */
+		pending_sense.key,
 		0x00,
 		0x00,
 		0x00,
@@ -400,15 +517,20 @@ static bool requestSense(void)
 		0x00,
 		0x00,
 		0x00,
-		0x30,
-		0x01,
+		pending_sense.asc,
+		pending_sense.ascq,
 		0x00,
 		0x00,
 		0x00,
 		0x00,
 	};
 
-	return write(request_sense, sizeof(request_sense));
+	if (!write(request_sense, sizeof(request_sense))) {
+		return false;
+	}
+
+	clear_pending_sense();
+	return true;
 }
 
 static bool inquiryRequest(void)
@@ -419,6 +541,13 @@ static bool inquiryRequest(void)
 static bool modeSense6(void)
 {
 	uint8_t sense6[] = { 0x03, 0x00, 0x00, 0x00 };
+	int status;
+
+	status = msc_disk_status(NULL);
+	if (msc_media_policy_is_read_only(&media_policy) ||
+	    (status >= 0 && (status & DISK_STATUS_WR_PROTECT))) {
+		sense6[2] |= MSC_MODE_SENSE6_WP;
+	}
 
 	return write(sense6, sizeof(sense6));
 }
@@ -578,6 +707,9 @@ static void CBWDecode(uint8_t *buf, uint16_t size)
 	if ((cbw.CBLength <  1) || (cbw.CBLength > 16) || (cbw.LUN != 0U)) {
 		LOG_WRN("cbw.CBLength %d", cbw.CBLength);
 		fail();
+	} else if (command_requires_media(cbw.CB[0], cbw.CB[1]) &&
+		   !admit_media_command(command_is_write(cbw.CB[0]))) {
+		return;
 	} else {
 		switch (cbw.CB[0]) {
 		case TEST_UNIT_READY:
@@ -682,6 +814,8 @@ static void CBWDecode(uint8_t *buf, uint16_t size)
 static void memoryVerify(uint8_t *buf, uint16_t size)
 {
 	uint32_t n;
+	enum msc_media_access access;
+	int ret;
 
 	if (curr_lba >= block_count) {
 		LOG_WRN("Attempt to read past end of device: lba=%u", curr_lba);
@@ -694,7 +828,15 @@ static void memoryVerify(uint8_t *buf, uint16_t size)
 	/* beginning of a new block -> load a whole block in RAM */
 	if (!curr_offset) {
 		LOG_DBG("Disk READ sector %u", curr_lba);
-		if (disk_access_read(disk_pdrv, page, curr_lba, 1)) {
+		access = begin_media_operation(false);
+		if (access != MSC_MEDIA_ACCESS_ALLOWED) {
+			fail_for_media_access(access);
+			return;
+		}
+
+		ret = disk_access_read(disk_pdrv, page, curr_lba, 1);
+		msc_media_policy_end_operation(&media_policy);
+		if (ret) {
 			LOG_ERR("---- Disk Read Error %u", curr_lba);
 		}
 	}
@@ -739,14 +881,11 @@ static void memoryWrite(uint8_t *buf, uint16_t size)
 
 	/* if the array is filled, write it in memory */
 	if (curr_offset + size >= BLOCK_SIZE) {
-		if (!(disk_access_status(disk_pdrv) &
-					DISK_STATUS_WR_PROTECT)) {
-			LOG_DBG("Disk WRITE Qd %u", curr_lba);
-			thread_op = THREAD_OP_WRITE_QUEUED;  /* write_queued */
-			defered_wr_sz = size;
-			k_sem_give(&disk_wait_sem);
-			return;
-		}
+		LOG_DBG("Disk WRITE Qd %u", curr_lba);
+		thread_op = THREAD_OP_WRITE_QUEUED;  /* write_queued */
+		defered_wr_sz = size;
+		k_sem_give(&disk_wait_sem);
+		return;
 	}
 
 	curr_offset += size;
@@ -830,12 +969,6 @@ static void thread_memory_write_done(void)
 	curr_lba += 1;
 	length -= size;
 	csw.DataResidue -= size;
-
-	if (!length) {
-		if (disk_access_ioctl(disk_pdrv, DISK_IOCTL_CTRL_SYNC, NULL)) {
-			LOG_ERR("!! Disk cache sync error !!");
-		}
-	}
 
 	if ((!length) || (stage != MSC_PROCESS_CBW)) {
 		csw.Status = (stage == MSC_ERROR) ? CSW_FAILED : CSW_PASSED;
@@ -974,6 +1107,11 @@ USBD_DEFINE_CFG_DATA(mass_storage_config) = {
 
 static void mass_thread_main(void *p1, void *p2, void *p3)
 {
+	enum msc_media_access access;
+	int disk_result;
+	int sync_result;
+	bool sync_required;
+
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
@@ -984,8 +1122,15 @@ static void mass_thread_main(void *p1, void *p2, void *p3)
 
 		switch (thread_op) {
 		case THREAD_OP_READ_QUEUED:
-			if (disk_access_read(disk_pdrv,
-						page, curr_lba, 1)) {
+			access = begin_media_operation(false);
+			if (access != MSC_MEDIA_ACCESS_ALLOWED) {
+				fail_for_media_access(access);
+				break;
+			}
+
+			disk_result = disk_access_read(disk_pdrv, page, curr_lba, 1);
+			msc_media_policy_end_operation(&media_policy);
+			if (disk_result) {
 				LOG_ERR("!! Disk Read Error %u !",
 					curr_lba);
 			}
@@ -993,10 +1138,29 @@ static void mass_thread_main(void *p1, void *p2, void *p3)
 			thread_memory_read_done();
 			break;
 		case THREAD_OP_WRITE_QUEUED:
-			if (disk_access_write(disk_pdrv,
-						page, curr_lba, 1)) {
+			access = begin_media_operation(true);
+			if (access != MSC_MEDIA_ACCESS_ALLOWED) {
+				fail_for_media_access(access);
+				thread_op = THREAD_OP_WRITE_DONE;
+				usb_ep_read_continue(mass_ep_data[MSD_OUT_EP_IDX].ep_addr);
+				break;
+			}
+
+			sync_required = length == defered_wr_sz;
+			disk_result = disk_access_write(disk_pdrv, page, curr_lba, 1);
+			sync_result = 0;
+			if (sync_required) {
+				sync_result = disk_access_ioctl(disk_pdrv,
+						       DISK_IOCTL_CTRL_SYNC, NULL);
+			}
+			msc_media_policy_end_operation(&media_policy);
+
+			if (disk_result) {
 				LOG_WRN("!!!!! Disk Write Error %u !!!!!",
 					curr_lba);
+			}
+			if (sync_result) {
+				LOG_ERR("!! Disk cache sync error !!");
 			}
 			thread_memory_write_done();
 			break;
@@ -1050,6 +1214,7 @@ static int mass_storage_init(void)
 	LOG_INF("Sect Count %u", block_count);
 	LOG_INF("Memory Size %llu", (uint64_t) block_count * BLOCK_SIZE);
 
+	msc_media_policy_init(&media_policy);
 	msd_state_machine_reset();
 	msd_init();
 
