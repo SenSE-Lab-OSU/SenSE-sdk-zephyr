@@ -21,6 +21,27 @@
 #include <zephyr/sys/barrier.h>
 LOG_MODULE_DECLARE(os, CONFIG_KERNEL_LOG_LEVEL);
 
+__weak void z_arm_fault_retention_snapshot(uint32_t fault_vector,
+	uint32_t msp, uint32_t psp, uint32_t exc_return, uint32_t cfsr,
+	uint32_t hfsr, uint32_t dfsr, uint32_t afsr, uint32_t mmfar,
+	uint32_t bfar)
+{
+	ARG_UNUSED(fault_vector);
+	ARG_UNUSED(msp);
+	ARG_UNUSED(psp);
+	ARG_UNUSED(exc_return);
+	ARG_UNUSED(cfsr);
+	ARG_UNUSED(hfsr);
+	ARG_UNUSED(dfsr);
+	ARG_UNUSED(afsr);
+	ARG_UNUSED(mmfar);
+	ARG_UNUSED(bfar);
+}
+
+__weak void z_arm_fault_retention_discard(void)
+{
+}
+
 #if defined(CONFIG_PRINTK) || defined(CONFIG_LOG)
 #define PR_EXC(...) LOG_ERR(__VA_ARGS__)
 #define STORE_xFAR(reg_var, reg) uint32_t reg_var = (uint32_t)reg
@@ -1102,6 +1123,14 @@ void z_arm_fault(uint32_t msp, uint32_t psp, uint32_t exc_return,
 	 */
 	struct arch_esf esf_copy;
 
+#if defined(CONFIG_ARMV7_M_ARMV8_M_MAINLINE)
+	z_arm_fault_retention_snapshot(fault, msp, psp, exc_return, SCB->CFSR,
+		SCB->HFSR, SCB->DFSR, SCB->AFSR, SCB->MMFAR, SCB->BFAR);
+#else
+	z_arm_fault_retention_snapshot(fault, msp, psp, exc_return, 0, 0, 0, 0,
+		0, 0);
+#endif
+
 	/* Force unlock interrupts */
 	arch_irq_unlock(0);
 
@@ -1118,6 +1147,7 @@ void z_arm_fault(uint32_t msp, uint32_t psp, uint32_t exc_return,
 
 	reason = fault_handle(esf, fault, &recoverable);
 	if (recoverable) {
+		z_arm_fault_retention_discard();
 		return;
 	}
 

@@ -44,6 +44,15 @@ __weak void k_sys_fatal_error_handler(unsigned int reason,
 	arch_system_halt(reason);
 	CODE_UNREACHABLE;
 }
+
+__weak void z_fatal_error_retention_capture(unsigned int reason,
+					    const struct arch_esf *esf,
+					    struct k_thread *thread)
+{
+	ARG_UNUSED(reason);
+	ARG_UNUSED(esf);
+	ARG_UNUSED(thread);
+}
 /* LCOV_EXCL_STOP */
 
 static const char *thread_name_get(struct k_thread *thread)
@@ -91,6 +100,8 @@ void z_fatal_error(unsigned int reason, const struct arch_esf *esf)
 	unsigned int key = arch_irq_lock();
 	struct k_thread *thread = IS_ENABLED(CONFIG_MULTITHREADING) ?
 			_current : NULL;
+
+	z_fatal_error_retention_capture(reason, esf, thread);
 
 	/* twister looks for the "ZEPHYR FATAL ERROR" string, don't
 	 * change it without also updating twister
