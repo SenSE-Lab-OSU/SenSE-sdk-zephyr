@@ -86,7 +86,7 @@
  * options.
  */
 #undef FF_FS_TINY
-#define FF_FS_TINY 1
+#define FF_FS_TINY 0
 
 #undef FF_FS_NORTC
 #define FF_FS_NORTC 0
