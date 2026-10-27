@@ -61,6 +61,10 @@ LOG_MODULE_REGISTER(bq274xx, CONFIG_SENSOR_LOG_LEVEL);
 /* Subclasses */
 #define BQ274XX_SUBCLASS_82 82
 #define BQ274XX_SUBCLASS_105 105
+#define BQ274XX_SUBCLASS_107 107
+
+/* SLUUAC9A, SLUUAC5C and SLUUCD5B: Current/Deadband, U1, mA. */
+#define BQ274XX_DM_DEADBAND 1
 
 /* For temperature conversion */
 #define KELVIN_OFFSET 273.15
@@ -460,11 +464,24 @@ static int bq274xx_gauge_configure(const struct device *dev)
 		if (ret < 0) {
 			return ret;
 		}
+	}
 
-		ret = bq274xx_mode_cfgupdate(dev, false);
+	ret = bq274xx_read_block(dev, BQ274XX_SUBCLASS_107, block, sizeof(block));
+	if (ret < 0) {
+		return ret;
+	}
+
+	if (block[BQ274XX_DM_DEADBAND] != config->current_deadband_ma) {
+		block[BQ274XX_DM_DEADBAND] = config->current_deadband_ma;
+		ret = bq274xx_write_block(dev, block, sizeof(block));
 		if (ret < 0) {
 			return ret;
 		}
+	}
+
+	ret = bq274xx_mode_cfgupdate(dev, false);
+	if (ret < 0) {
+		return ret;
 	}
 
 	ret = bq274xx_ctrl_reg_write(dev, BQ274XX_CTRL_SEALED);
@@ -862,6 +879,9 @@ static const struct sensor_driver_api bq274xx_battery_driver_api = {
 #endif
 
 #define BQ274XX_INIT(index)							\
+	BUILD_ASSERT(DT_INST_PROP(index, current_deadband_ma) >= 0 &&		\
+		     DT_INST_PROP(index, current_deadband_ma) <= UINT8_MAX,	\
+		     "current-deadband-ma must be in range 0..255");		\
 	static struct bq274xx_data bq274xx_driver_##index;			\
 										\
 	static const struct bq274xx_config bq274xx_config_##index = {		\
@@ -872,6 +892,7 @@ static const struct sensor_driver_api bq274xx_battery_driver_api = {
 		.taper_current = DT_INST_PROP(index, taper_current),		\
 		.terminate_voltage = DT_INST_PROP(index, terminate_voltage),	\
 		.chemistry_id = DT_INST_PROP_OR(index, chemistry_id, 0),			\
+		.current_deadband_ma = DT_INST_PROP(index, current_deadband_ma),	\
 		.lazy_loading = DT_INST_PROP(index, zephyr_lazy_load),		\
 	};									\
 										\

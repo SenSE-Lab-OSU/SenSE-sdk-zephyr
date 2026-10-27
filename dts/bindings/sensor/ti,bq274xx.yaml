@@ -35,6 +35,14 @@ properties:
       Minimum operating voltage of your system. This is the target where the
       gauge typically reports 0% capacity. In mV.
 
+  current-deadband-ma:
+    type: int
+    default: 5
+    description: |
+      Current-reporting deadband in mA (0 to 255). Currents inside this
+      window are reported as zero. Supported on BQ27421-G1, BQ27441-G1
+      and BQ27427. The default matches the factory setting.
+
   chemistry-id:
     type: int
     description: |

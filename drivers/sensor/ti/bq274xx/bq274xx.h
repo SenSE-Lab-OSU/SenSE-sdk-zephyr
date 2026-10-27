@@ -126,6 +126,7 @@ struct bq274xx_config {
 	struct gpio_dt_spec int_gpios;
 #endif
 	uint16_t chemistry_id;
+	uint8_t current_deadband_ma;
 	bool lazy_loading;
 };
 
